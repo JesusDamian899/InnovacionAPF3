@@ -211,6 +211,39 @@ def predict():
             bultos_sugeridos = 0
             unidades_sugeridas = 0.0
 
+        # Persistir la inferencia en la tabla predicciones_ml de Supabase (Trazabilidad Cloud)
+        conn = get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    prob_q = round(min(0.99, max(0.01, (rop - stock_actual) / max(rop, 1.0))), 4) if stock_actual < rop else 0.02
+                    tendencia_sem = round((pred_demanda - media_movil_7d) / max(media_movil_7d, 1.0), 4)
+                    cur.execute("""
+                        INSERT INTO predicciones_ml (
+                            fecha_calculo, producto_id, consumo_promedio_7d, demanda_predicha_7d,
+                            tendencia_semanal, stock_seguridad, punto_reorden, dias_para_agotarse,
+                            probabilidad_quiebre, riesgo, pedido_sugerido_bultos, pedido_sugerido_unidades,
+                            modelo_version, mape_backtest, origen
+                        ) VALUES (CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'GradientBoosting-v1.0-APF3', 15.63, 'real')
+                    """, (
+                        data.get("producto_id", "fv-mandarina"),
+                        round(media_movil_7d, 2),
+                        round(pred_demanda * 7, 2),
+                        tendencia_sem,
+                        ss,
+                        rop,
+                        dias_cobertura,
+                        prob_q,
+                        riesgo,
+                        bultos_sugeridos,
+                        unidades_sugeridas
+                    ))
+                    conn.commit()
+            except Exception as db_ex:
+                print(f"Aviso: No se pudo guardar en predicciones_ml: {db_ex}")
+            finally:
+                conn.close()
+
         # Respuesta en formato JSON del Contrato de Integración
         return jsonify({
             "sku": data.get("sku", "SKU-3A"),

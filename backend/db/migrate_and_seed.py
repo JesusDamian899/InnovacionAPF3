@@ -12,8 +12,8 @@ if sys.stdout.encoding != 'utf-8':
     except Exception:
         pass
 
-# Configuración de conexión a Supabase PostgreSQL
-DB_URI = "postgresql://postgres:shTEgJDJSqDGpqG5@db.uqkkjfsuvjwyyixcubmt.supabase.co:5432/postgres"
+# Configuración de conexión a Supabase PostgreSQL (Pooler IPv4)
+DB_URI = "postgresql://postgres.uqkkjfsuvjwyyixcubmt:shTEgJDJSqDGpqG5@aws-0-us-east-1.pooler.supabase.com:6543/postgres"
 
 CATEGORIES = [
     {"id": "fv", "name": "Frutas y verduras", "emoji": "🍊", "color_slot": 0, "lead_time_dias": 1},
@@ -280,7 +280,103 @@ def main():
     conn.commit()
     print(f"✓ {len(orders)} órdenes de compra iniciales insertadas.")
 
-    # 7. Resumen de conteos
+    # 7. Calcular y poblar las 33 predicciones iniciales en predicciones_ml usando modelo_demanda_3a.joblib
+    model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "modelo_demanda_3a.joblib")
+    if os.path.exists(model_path):
+        import joblib
+        import pandas as pd
+        import numpy as np
+        model_pipeline = joblib.load(model_path)
+        cur.execute("DELETE FROM predicciones_ml WHERE origen = 'simulado';")
+        pred_rows = []
+        sales_by_prod = {}
+        for sr in sales_records:
+            sales_by_prod.setdefault(sr["producto_id"], []).append(sr["unidades_vendidas"])
+
+        for p in products:
+            pid = p["id"]
+            hist_u = sales_by_prod.get(pid, [15.0] * 7)
+            lag_1d = float(hist_u[-1])
+            lag_7d = float(hist_u[-7])
+            last7 = hist_u[-7:]
+            media_7d = float(sum(last7) / len(last7))
+            std_7d = float(max(1.5, np.std(last7, ddof=1) if len(last7) > 1 else media_7d * 0.15))
+
+            df_in = pd.DataFrame([{
+                "precio": float(p["precio"]),
+                "costo": float(p["costo"]),
+                "lag_1d": lag_1d,
+                "lag_7d": lag_7d,
+                "media_movil_7d": media_7d,
+                "std_movil_7d": std_7d,
+                "dia_semana": today.weekday(),
+                "es_fin_de_semana": 1 if today.weekday() in (4, 5, 6) else 0,
+                "es_quincena": 1 if today.day in (15, 16, 30, 31, 1) else 0,
+                "categoria_id": p["categoria_id"]
+            }])
+            pred_dia = max(0.1, round(float(model_pipeline.predict(df_in)[0]), 2))
+            lead_t = int(p["lead_time_dias"])
+            stock_act = float(p["stock_gondola"]) + float(p["stock_almacen"])
+            pack_sz = float(p["pack_size"])
+            ss = round(1.645 * std_7d * math.sqrt(lead_t), 2)
+            rop = round(pred_dia * (lead_t + 1) + ss, 2)
+            dias_agot = round(stock_act / pred_dia, 2)
+            req_ord = stock_act <= rop
+            if stock_act <= 0:
+                riesgo = "critico"
+            elif stock_act <= ss:
+                riesgo = "alto"
+            elif req_ord:
+                riesgo = "medio"
+            else:
+                riesgo = "bajo"
+
+            if req_ord:
+                meta = rop + pred_dia * 7
+                bultos = math.ceil(max(0.0, meta - stock_act) / pack_sz)
+                unid_sug = round(bultos * pack_sz, 2)
+            else:
+                bultos = 0
+                unid_sug = 0.0
+
+            prob_q = round(min(0.99, max(0.01, (rop - stock_act) / max(rop, 1.0))), 4) if stock_act < rop else 0.02
+            tend_sem = round((pred_dia - media_7d) / max(media_7d, 1.0), 4)
+            pred_rows.append({
+                "fecha_calculo": today,
+                "producto_id": pid,
+                "consumo_promedio_7d": round(media_7d, 2),
+                "demanda_predicha_7d": round(pred_dia * 7, 2),
+                "tendencia_semanal": tend_sem,
+                "stock_seguridad": ss,
+                "punto_reorden": rop,
+                "dias_para_agotarse": dias_agot,
+                "probabilidad_quiebre": prob_q,
+                "riesgo": riesgo,
+                "pedido_sugerido_bultos": bultos,
+                "pedido_sugerido_unidades": unid_sug,
+                "modelo_version": "GradientBoosting-v1.0-APF3",
+                "mape_backtest": 15.63,
+                "origen": "simulado"
+            })
+
+        pred_query = """
+        INSERT INTO predicciones_ml (
+            fecha_calculo, producto_id, consumo_promedio_7d, demanda_predicha_7d,
+            tendencia_semanal, stock_seguridad, punto_reorden, dias_para_agotarse,
+            probabilidad_quiebre, riesgo, pedido_sugerido_bultos, pedido_sugerido_unidades,
+            modelo_version, mape_backtest, origen
+        ) VALUES (
+            %(fecha_calculo)s, %(producto_id)s, %(consumo_promedio_7d)s, %(demanda_predicha_7d)s,
+            %(tendencia_semanal)s, %(stock_seguridad)s, %(punto_reorden)s, %(dias_para_agotarse)s,
+            %(probabilidad_quiebre)s, %(riesgo)s, %(pedido_sugerido_bultos)s, %(pedido_sugerido_unidades)s,
+            %(modelo_version)s, %(mape_backtest)s, %(origen)s
+        );
+        """
+        execute_batch(cur, pred_query, pred_rows)
+        conn.commit()
+        print(f"✓ {len(pred_rows)} predicciones iniciales de Machine Learning insertadas en predicciones_ml.")
+
+    # 8. Resumen de conteos
     cur.execute("SELECT count(*) FROM categorias;")
     num_cat = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM productos;")
@@ -291,6 +387,8 @@ def main():
     num_kardex = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM ordenes_compra;")
     num_orders = cur.fetchone()[0]
+    cur.execute("SELECT count(*) FROM predicciones_ml;")
+    num_preds = cur.fetchone()[0]
 
     print("\n================ RESUMEN SUPABASE ================")
     print(f"Categorías:         {num_cat}")
@@ -298,6 +396,7 @@ def main():
     print(f"Ventas Históricas:  {num_sales} filas (Dataset APF3)")
     print(f"Kardex:             {num_kardex} movimientos")
     print(f"Órdenes de compra:  {num_orders}")
+    print(f"Predicciones ML:    {num_preds} registros")
     print("==================================================")
 
     cur.close()
