@@ -85,7 +85,7 @@ export async function checkBackendHealth(timeoutMs = 35000): Promise<BackendHeal
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(`${API_BASE_URL}/health`, {
+    const res = await fetch(`${API_BASE_URL}/api/health`, {
       method: 'GET',
       headers: { 'Accept': 'application/json' },
       signal: controller.signal,
@@ -97,7 +97,7 @@ export async function checkBackendHealth(timeoutMs = 35000): Promise<BackendHeal
     }
     return await res.json();
   } catch (err: any) {
-    console.warn(`[ML API Health] No se pudo contactar a ${API_BASE_URL}/health:`, err?.message || err);
+    console.warn(`[ML API Health] No se pudo contactar a ${API_BASE_URL}/api/health:`, err?.message || err);
     return null;
   }
 }

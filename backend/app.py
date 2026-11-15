@@ -93,6 +93,7 @@ def serialize_db_row(row):
 
 @app.route("/", methods=["GET", "OPTIONS"])
 @app.route("/health", methods=["GET", "OPTIONS"])
+@app.route("/api/health", methods=["GET", "OPTIONS"])
 def health():
     if request.method == "OPTIONS":
         return jsonify({}), 200

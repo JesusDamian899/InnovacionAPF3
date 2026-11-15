@@ -29,14 +29,8 @@ export function BackendStatusPill() {
       if (!mounted) return;
     });
 
-    // Sondeo periódico cada 25 segundos
-    const interval = setInterval(() => {
-      if (mounted) checkStatus(false);
-    }, 25000);
-
     return () => {
       mounted = false;
-      clearInterval(interval);
     };
   }, []);
 
