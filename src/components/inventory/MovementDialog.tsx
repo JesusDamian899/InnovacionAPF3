@@ -1,9 +1,10 @@
-import { ArrowRightLeft, ClipboardList, PackageMinus, PackagePlus, ShoppingCart } from 'lucide-react';
+import { ArrowRightLeft, ClipboardList, Loader2, PackageMinus, PackagePlus, ShoppingCart } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { ProductAvatar } from '@/components/ui/ProductAvatar';
 import { useToast } from '@/components/ui/Toast';
 import { number, qty as fmtQty } from '@/lib/format';
+import { persistMovement } from '@/services/apiClient';
 import { WASTE_REASONS, type WasteReason } from '@/store/reducer';
 import { useStore } from '@/store/StoreProvider';
 
@@ -43,6 +44,7 @@ export function MovementDialog({
   const [from, setFrom] = useState<'gondola' | 'almacen'>('gondola');
   const [adjG, setAdjG] = useState(0);
   const [adjA, setAdjA] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
 
   const p = productById[productId ?? ''];
 
@@ -100,10 +102,22 @@ export function MovementDialog({
   const invalid =
     kind === 'ajuste' ? adjG < 0 || adjA < 0 : amount <= 0 || (kind === 'reposicion' && p.stockAlmacen <= 0);
 
-  const submit = () => {
-    if (invalid) return;
+  const submit = async () => {
+    if (invalid || submitting) return;
+    setSubmitting(true);
+
+    let moveType = 'VENTA';
+    let moveQty = amount;
+    let moveReason = 'Operación manual';
+    let moveAmount: number | undefined = undefined;
+
     switch (kind) {
-      case 'venta':
+      case 'venta': {
+        moveType = 'VENTA';
+        const sold = Math.max(0, amount - lostPreview);
+        moveQty = sold > 0 ? sold : amount;
+        moveAmount = moveQty * p.price;
+        moveReason = lostPreview > 0 ? `Venta de mostrador (${number(lostPreview)} no atendidas)` : 'Venta de mostrador';
         dispatch({ type: 'SELL', productId: p.id, qty: amount });
         toast(
           lostPreview > 0
@@ -112,24 +126,65 @@ export function MovementDialog({
           lostPreview > 0 ? 'warning' : 'success',
         );
         break;
-      case 'reposicion':
+      }
+      case 'reposicion': {
+        moveType = 'REPOSICION';
+        moveQty = Math.min(amount, p.stockAlmacen);
+        moveReason = 'Reposición interna (almacén → góndola)';
         dispatch({ type: 'REFILL', productId: p.id, qty: amount });
         toast(`Se bajaron ${number(Math.min(amount, p.stockAlmacen))} ${unit} de ${p.name} a la góndola.`);
         break;
-      case 'entrada':
+      }
+      case 'entrada': {
+        moveType = 'ENTRADA';
+        moveQty = amount;
+        moveReason = 'Ingreso de mercadería al almacén';
         dispatch({ type: 'RECEIVE', productId: p.id, qty: amount });
         toast(`Ingreso de ${number(amount)} ${unit} de ${p.name} al almacén.`);
         break;
-      case 'merma':
+      }
+      case 'merma': {
+        moveType = 'MERMA';
+        moveQty = amount;
+        moveReason = `${reason} (${from === 'gondola' ? 'góndola' : 'almacén'})`;
         dispatch({ type: 'WASTE', productId: p.id, qty: amount, reason, from });
         toast(`Merma registrada: ${number(amount)} ${unit} (${reason.toLowerCase()}).`, 'info');
         break;
-      case 'ajuste':
+      }
+      case 'ajuste': {
+        moveType = 'AJUSTE';
+        moveQty = Math.abs((adjG + adjA) - (p.stockGondola + p.stockAlmacen));
+        moveReason = 'Ajuste de inventario físico';
         dispatch({ type: 'ADJUST', productId: p.id, gondola: adjG, almacen: adjA });
         toast(`Stock de ${p.name} ajustado por conteo físico.`, 'info');
         break;
+      }
     }
-    onClose();
+
+    try {
+      const persisted = await persistMovement({
+        id: `MV-${Date.now()}`,
+        ts: Date.now(),
+        productId: p.id,
+        type: moveType,
+        qty: moveQty,
+        user: 'Colaborador 3A',
+        reason: moveReason,
+        amount: moveAmount,
+        gondolaAfter: preview.g,
+        almacenAfter: preview.a,
+      });
+      if (persisted) {
+        console.log('[Kardex Sync] Movimiento guardado en Supabase exitosamente.');
+      } else {
+        console.warn('[Kardex Sync] El backend no pudo persistir en Supabase.');
+      }
+    } catch (e) {
+      console.warn('[Kardex Sync] Error de red persistiendo movimiento:', e);
+    } finally {
+      setSubmitting(false);
+      onClose();
+    }
   };
 
   return (
@@ -140,11 +195,17 @@ export function MovementDialog({
       subtitle="Se actualiza el kardex y se recalculan las predicciones al instante"
       footer={
         <>
-          <button className="btn-ghost" onClick={onClose}>
+          <button className="btn-ghost" onClick={onClose} disabled={submitting}>
             Cancelar
           </button>
-          <button className="btn-primary flex-1 sm:flex-none" disabled={invalid} onClick={submit}>
-            Registrar en kardex
+          <button className="btn-primary flex-1 sm:flex-none" disabled={invalid || submitting} onClick={submit}>
+            {submitting ? (
+              <span className="flex items-center gap-1.5">
+                <Loader2 size={15} className="animate-spin" /> Guardando en Supabase...
+              </span>
+            ) : (
+              'Registrar en kardex'
+            )}
           </button>
         </>
       }

@@ -17,6 +17,7 @@ import { RISK_LABEL, SHELF_SHORT } from '@/lib/colors';
 import { downloadCsv } from '@/lib/csv';
 import { toDateKey } from '@/lib/dates';
 import { money, number, qty } from '@/lib/format';
+import { persistMovement } from '@/services/apiClient';
 import { useFilteredProducts } from '@/store/hooks';
 import { useStore } from '@/store/StoreProvider';
 
@@ -47,6 +48,22 @@ export default function ProductsPage() {
     dispatch({ type: 'SELL', productId: p.id, qty: 1 });
     if (p.stockGondola < 1) toast(`${p.name}: góndola sin stock suficiente, se registró una venta perdida.`, 'warning');
     else toast(`Venta de 1 ${p.unit === 'kg' ? 'kg' : 'un.'} de ${p.name}.`);
+
+    const sold = Math.min(1, p.stockGondola);
+    if (sold > 0) {
+      persistMovement({
+        id: `MV-${Date.now()}`,
+        ts: Date.now(),
+        productId: p.id,
+        type: 'VENTA',
+        qty: sold,
+        user: 'Colaborador 3A (Caja Rápida)',
+        reason: 'Venta rápida 1 unidad',
+        amount: sold * p.price,
+        gondolaAfter: Math.max(0, p.stockGondola - sold),
+        almacenAfter: p.stockAlmacen,
+      }).catch(console.warn);
+    }
   };
   const quickRefill = (p: Product, i: ProductInsight) => {
     const amount = i.shelfRefill > 0 ? i.shelfRefill : Math.min(p.stockAlmacen, Math.max(0, p.gondolaCapacity - p.stockGondola));
@@ -56,6 +73,18 @@ export default function ProductsPage() {
     }
     dispatch({ type: 'REFILL', productId: p.id, qty: amount });
     toast(`Se bajaron ${number(amount)} ${p.unit === 'kg' ? 'kg' : 'un.'} de ${p.name} a ${p.location}.`);
+
+    persistMovement({
+      id: `MV-${Date.now()}`,
+      ts: Date.now(),
+      productId: p.id,
+      type: 'REPOSICION',
+      qty: amount,
+      user: 'Colaborador 3A (Reposición)',
+      reason: 'Reposición rápida góndola',
+      gondolaAfter: p.stockGondola + amount,
+      almacenAfter: Math.max(0, p.stockAlmacen - amount),
+    }).catch(console.warn);
   };
 
   const exportCsv = () =>

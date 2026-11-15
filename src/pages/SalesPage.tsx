@@ -14,6 +14,7 @@ import { categoryColor } from '@/lib/colors';
 import { downloadCsv } from '@/lib/csv';
 import { formatDateTime, formatDayShort, toDateKey } from '@/lib/dates';
 import { axisMoney, integer, money, moneyCompact, number, percent, signedPercent } from '@/lib/format';
+import { persistMovement } from '@/services/apiClient';
 import { matchesFilters } from '@/store/hooks';
 import { useStore } from '@/store/StoreProvider';
 
@@ -156,11 +157,27 @@ function QuickPos() {
   const sell = () => {
     if (amount <= 0) return;
     const lost = Math.max(0, amount - p.stockGondola);
+    const sold = Math.min(amount, p.stockGondola);
     dispatch({ type: 'SELL', productId: p.id, qty: amount });
     toast(
       lost > 0 ? `${p.name}: se vendieron ${number(amount - lost)} ${u}; ${number(lost)} ${u} no se atendieron (góndola vacía).` : `Venta: ${number(amount)} ${u} de ${p.name} · ${money(amount * p.price)}`,
       lost > 0 ? 'warning' : 'success',
     );
+
+    if (sold > 0) {
+      persistMovement({
+        id: `MV-${Date.now()}`,
+        ts: Date.now(),
+        productId: p.id,
+        type: 'VENTA',
+        qty: sold,
+        user: 'Caja 1',
+        reason: lost > 0 ? `Venta de mostrador (${number(lost)} no atendidas)` : 'Venta de mostrador',
+        amount: sold * p.price,
+        gondolaAfter: Math.max(0, p.stockGondola - sold),
+        almacenAfter: p.stockAlmacen,
+      }).catch(console.warn);
+    }
   };
 
   return (

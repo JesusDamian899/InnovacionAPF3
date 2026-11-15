@@ -12,6 +12,7 @@ import sys
 import json
 import math
 import datetime
+import decimal
 import joblib
 import numpy as np
 import pandas as pd
@@ -71,6 +72,20 @@ def get_db_connection():
     except Exception as e:
         print(f"Error conectando a BD: {e}")
         return None
+
+def serialize_db_row(row):
+    """Convierte tipos Decimal y Date/Datetime a float y str para serialización JSON segura."""
+    if not row:
+        return row
+    res = {}
+    for k, v in row.items():
+        if isinstance(v, decimal.Decimal):
+            res[k] = float(v)
+        elif isinstance(v, (datetime.date, datetime.datetime)):
+            res[k] = v.isoformat()
+        else:
+            res[k] = v
+    return res
 
 # =============================================================================
 # ENDPOINTS REST (CONTRATO DE INTEGRACIÓN - SECCIÓN 6.3)
@@ -254,7 +269,36 @@ def get_products():
                 ORDER BY p.categoria_id, p.sku;
             """)
             rows = cur.fetchall()
-            return jsonify(rows), 200
+            return jsonify([serialize_db_row(r) for r in rows]), 200
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+    finally:
+        conn.close()
+
+@app.route("/api/sales", methods=["GET"])
+def get_sales():
+    """Consulta el historial de 90 días de ventas desde Supabase agrupado por producto."""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Base de datos no disponible."}), 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT fecha, producto_id, unidades_vendidas
+                FROM historial_ventas
+                ORDER BY fecha ASC;
+            """)
+            rows = cur.fetchall()
+            history = {}
+            for r in rows:
+                pid = r["producto_id"]
+                if pid not in history:
+                    history[pid] = []
+                history[pid].append({
+                    "date": r["fecha"].isoformat() if hasattr(r["fecha"], "isoformat") else str(r["fecha"]),
+                    "units": float(r["unidades_vendidas"])
+                })
+            return jsonify({"history": history}), 200
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
     finally:
@@ -276,7 +320,8 @@ def movements():
                     JOIN productos p ON m.producto_id = p.id
                     ORDER BY m.ts DESC LIMIT 100;
                 """)
-                return jsonify(cur.fetchall()), 200
+                rows = cur.fetchall()
+                return jsonify([serialize_db_row(r) for r in rows]), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
         finally:

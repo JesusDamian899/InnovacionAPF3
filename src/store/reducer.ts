@@ -1,4 +1,4 @@
-import type { EngineSettings, GlobalFilters, Movement, MovementType, Product, SimulatorState } from '@/domain/types';
+import type { EngineSettings, GlobalFilters, Movement, MovementType, Product, SalesHistory, SimulatorState } from '@/domain/types';
 import { addDays, toDateKey } from '@/lib/dates';
 import { uid } from '@/lib/random';
 import { applySale, roundQty, simulateMinutes, simulateToNextDay } from './simulation';
@@ -23,7 +23,8 @@ export type Action =
   | { type: 'SET_SIMULATOR'; patch: Partial<SimulatorState> }
   | { type: 'SET_FILTERS'; patch: Partial<GlobalFilters> }
   | { type: 'SNOOZE_ALERT'; alertId: string; minutes: number }
-  | { type: 'RESET' };
+  | { type: 'RESET' }
+  | { type: 'HYDRATE_FROM_BACKEND'; products: Product[]; movements: Movement[]; history: SalesHistory; todaySales?: Record<string, number> };
 
 const DEFAULT_USER = 'Administrador';
 
@@ -183,6 +184,16 @@ export function reducer(state: AppState, action: Action): AppState {
 
     case 'RESET':
       return createInitialState();
+
+    case 'HYDRATE_FROM_BACKEND':
+      return {
+        ...state,
+        products: action.products,
+        movements: action.movements,
+        history: action.history,
+        todaySales: action.todaySales ?? {},
+        lostToday: Object.fromEntries(action.products.map((p) => [p.id, 0])),
+      };
 
     default:
       return state;

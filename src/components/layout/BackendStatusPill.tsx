@@ -9,7 +9,7 @@ export function BackendStatusPill() {
   const checkStatus = async (isManual = false) => {
     if (isManual) setStatus('waking');
     try {
-      const h = await checkBackendHealth(isManual ? 20000 : 8000);
+      const h = await checkBackendHealth(isManual ? 45000 : 35000);
       if (h?.model_loaded) {
         setHealth(h);
         setStatus('online');

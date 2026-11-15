@@ -5,6 +5,8 @@
  * Cumple con el Contrato de Integración de la Rúbrica APF3 (Sección 6.3).
  */
 
+import type { Movement, MovementType, Product, SalesHistory } from '@/domain/types';
+
 export interface MLPredictionRequest {
   sku: string;
   producto_id: string;
@@ -65,13 +67,21 @@ function resolveApiBaseUrl(): string {
     }
     return clean;
   }
+  // Si estamos en la nube (ej. Vercel) y no se definió VITE_API_URL, usar paths relativos ""
+  // para que las reglas de rewrite en vercel.json reenvíen las peticiones a Render sin bloqueos
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      return '';
+    }
+  }
   return 'http://localhost:5000';
 }
 
 export const API_BASE_URL = resolveApiBaseUrl();
 
-/** Verifica disponibilidad del backend Flask / Render (permite hasta 15s si Render está en cold start) */
-export async function checkBackendHealth(timeoutMs = 12000): Promise<BackendHealth | null> {
+/** Verifica disponibilidad del backend Flask / Render (soporta hasta 35s por cold start de Render Free) */
+export async function checkBackendHealth(timeoutMs = 35000): Promise<BackendHealth | null> {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -145,5 +155,116 @@ export async function persistMovement(movement: {
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+/** Consulta los 33 productos desde Supabase a través del backend Flask */
+export async function fetchProductsFromBackend(): Promise<Product[] | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/products`);
+    if (!res.ok) return null;
+    const rawList: any[] = await res.json();
+    return rawList.map((p) => ({
+      id: String(p.id),
+      sku: String(p.sku),
+      barcode: String(p.codigo_barras || ''),
+      name: String(p.nombre),
+      categoryId: String(p.categoria_id),
+      unit: (p.unidad === 'kg' ? 'kg' : 'un') as 'kg' | 'un',
+      price: Number(p.precio),
+      cost: Number(p.costo),
+      stockGondola: Number(p.stock_gondola),
+      stockAlmacen: Number(p.stock_almacen),
+      gondolaCapacity: Number(p.capacidad_gondola || 30),
+      packSize: Number(p.pack_size || 1),
+      packLabel: String(p.pack_label || 'bulto'),
+      leadTimeDays: Number(p.lead_time_dias || 1),
+      location: String(p.ubicacion || 'Góndola'),
+      abc: (p.abc || 'B') as 'A' | 'B' | 'C',
+      emoji: String(p.emoji || '📦'),
+    }));
+  } catch (err) {
+    console.warn('[API] Error al consultar productos desde el backend:', err);
+    return null;
+  }
+}
+
+/** Consulta los movimientos del Kardex desde Supabase */
+export async function fetchMovementsFromBackend(): Promise<Movement[] | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/movements`);
+    if (!res.ok) return null;
+    const rawList: any[] = await res.json();
+    return rawList.map((m) => ({
+      id: String(m.id),
+      ts: Number(m.ts || Date.now()),
+      productId: String(m.producto_id),
+      type: (m.tipo || 'VENTA') as MovementType,
+      qty: Number(m.cantidad),
+      user: String(m.usuario || 'Colaborador 3A'),
+      reason: m.motivo ? String(m.motivo) : undefined,
+      amount: m.monto !== null && m.monto !== undefined ? Number(m.monto) : undefined,
+      gondolaAfter: Number(m.gondola_despues || 0),
+      almacenAfter: Number(m.almacen_despues || 0),
+    }));
+  } catch (err) {
+    console.warn('[API] Error al consultar movimientos desde el backend:', err);
+    return null;
+  }
+}
+
+/** Consulta el historial de 90 días de ventas desde Supabase */
+export async function fetchSalesHistoryFromBackend(): Promise<SalesHistory | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/sales`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.history as SalesHistory;
+  } catch (err) {
+    console.warn('[API] Error al consultar historial de ventas desde el backend:', err);
+    return null;
+  }
+}
+
+export interface BackendBootstrapData {
+  products: Product[];
+  movements: Movement[];
+  history: SalesHistory;
+  todaySales: Record<string, number>;
+}
+
+/** Carga coordinada de todo el ecosistema de datos reales desde el backend */
+export async function fetchAllBackendData(): Promise<BackendBootstrapData | null> {
+  try {
+    const [products, movements, history] = await Promise.all([
+      fetchProductsFromBackend(),
+      fetchMovementsFromBackend(),
+      fetchSalesHistoryFromBackend(),
+    ]);
+
+    if (!products || products.length === 0) {
+      return null;
+    }
+
+    // Calcular ventas del día a partir de movimientos tipo VENTA de hoy
+    const todaySales: Record<string, number> = {};
+    const todayStart = new Date().setHours(0, 0, 0, 0);
+    if (movements) {
+      for (const m of movements) {
+        if (m.type === 'VENTA' && m.ts >= todayStart) {
+          todaySales[m.productId] = (todaySales[m.productId] || 0) + m.qty;
+        }
+      }
+    }
+
+    return {
+      products,
+      movements: movements || [],
+      history: history || {},
+      todaySales,
+    };
+  } catch (err) {
+    console.error('[API] Error cargando datos iniciales del backend:', err);
+    return null;
   }
 }
